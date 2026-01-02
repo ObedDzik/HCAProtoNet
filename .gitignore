@@ -1,3 +1,5 @@
 rough.ipynb
 logs
 hca_env
+__pycache__
+wandb

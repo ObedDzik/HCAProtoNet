@@ -331,35 +331,6 @@ class ProstateTransform:
                 interpolation=InterpolationMode.NEAREST
             )
 
-        # Random affine (translation + scale) - FIXED IMPLEMENTATION
-        # if torch.rand(1).item() < geo_p:
-        #     translate = self.aug_params['translate']
-        #     scale = self.aug_params['scale']
-            
-        #     # Get random parameters
-        #     scale_factor = torch.FloatTensor(1).uniform_(*scale).item()
-        #     translate_x = torch.FloatTensor(1).uniform_(-translate[0], translate[0]).item()
-        #     translate_y = torch.FloatTensor(1).uniform_(-translate[1], translate[1]).item()
-            
-        #     # Apply same affine transform to all tensors
-        #     affine_params = {
-        #         'angle': 0,
-        #         'translate': (int(translate_x * bmode_tensor.shape[-1]), 
-        #                      int(translate_y * bmode_tensor.shape[-2])),
-        #         'scale': scale_factor,
-        #         'shear': 0
-        #     }
-            
-        #     bmode_tensor = T.functional.affine(bmode_tensor, 
-        #                                       interpolation=InterpolationMode.BILINEAR,
-        #                                       **affine_params)
-        #     needle_mask_tensor = T.functional.affine(needle_mask_tensor, 
-        #                                             interpolation=InterpolationMode.NEAREST,
-        #                                             **affine_params)
-        #     prostate_mask_tensor = T.functional.affine(prostate_mask_tensor, 
-        #                                               interpolation=InterpolationMode.NEAREST,
-        #                                               **affine_params)
-
         # 1. GEOMETRIC AUGMENTATIONS (translation + scale + shear)
         if torch.rand(1).item() < geo_p:
             translate = self.aug_params['translate']

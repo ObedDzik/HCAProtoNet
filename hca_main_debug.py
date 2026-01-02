@@ -7,9 +7,8 @@ import numpy as np
 import random
 from pathlib import Path
 from collections import Counter
-from pathlib import Path
 
-from network import HCAProtoNet
+from network_debug import HCAProtoNet
 from train import train_hca
 from inference import validate, visualize_prototypes
 from as_dataset import get_datasets
@@ -40,15 +39,20 @@ def main(cfg):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log(f"Using device: {device}")
 
+    # Set seed for reproducibility
     seed = cfg.seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    # Set to True for speed if input sizes are constant
+    torch.backends.cudnn.benchmark = True
 
+    # Create backbone
     backbone = create_backbone(cfg=cfg.backbone)
+    
+    # Create model
     model = HCAProtoNet(
         backbone=backbone,
         num_classes=cfg.train.num_classes,
@@ -69,24 +73,31 @@ def main(cfg):
     log(f"Model initialized with {cfg.train.num_classes} classes")
     log(f"Rare classes: {cfg.train.rare_classes}")
 
-    # Data
+    # Load datasets
     train_dataset, val_dataset = get_datasets(cfg=cfg.data)
-    train_loader = make_loader(dataset=train_dataset, cfg=cfg.data, shuffle=False, weighted=True, pin_memory=True, drop_last=True)
-    val_loader = make_loader(dataset=val_dataset, cfg=cfg.data, shuffle=False, weighted=False, pin_memory=False)
-
-    # Training Frequencies
-    label_counts = Counter(
-        data['primus_label'].item() if torch.is_tensor(data['primus_label']) else data['primus_label']
-        for data in train_dataset
+    
+    # IMPORTANT: Initialize model from dataset (sets frequencies + prototypes)
+    model.initialize_from_dataset(train_dataset)
+    log(f"Model initialized from {len(train_dataset)} training samples")
+    
+    # Create data loaders
+    train_loader = make_loader(
+        dataset=train_dataset, 
+        cfg=cfg.data, 
+        shuffle=False,
+        weighted=True, 
+        pin_memory=True, 
+        drop_last=True
     )
-    model.training_frequencies = {
-        c: label_counts.get(c, 1) for c in range(model.num_classes)
-    }
-    model.N_max = max(model.training_frequencies.values())
+    val_loader = make_loader(
+        dataset=val_dataset, 
+        cfg=cfg.data, 
+        shuffle=False, 
+        weighted=False, 
+        pin_memory=True
+    )
 
-    log(f"Training frequencies: {model.training_frequencies}")
-
-    # Optimizer
+    # Create optimizer (initial setup for warmup)
     rare_params = [model.rare_prototypes[str(c)] for c in cfg.train.rare_classes]
     optimizer = torch.optim.Adam(
         [
@@ -102,41 +113,65 @@ def main(cfg):
 
     warmup_epochs = cfg.train.get('warmup_epochs', 20)
     joint_epochs = cfg.train.get('joint_epochs', 80)
+    
+    # Learning rate scheduler (cosine annealing for better convergence)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=cfg.train.num_epochs,
+        eta_min=cfg.train.lr * 0.01
+    )
 
     for epoch in range(cfg.train.num_epochs):
+        # Determine phase
         if epoch < warmup_epochs:
             phase = "warmup"
+            # Freeze rare prototypes during warmup
             for c in cfg.train.rare_classes:
                 model.rare_prototypes[str(c)].requires_grad_(False)
 
         elif epoch < joint_epochs:
             phase = "joint"
+            # Unfreeze rare prototypes
             for c in cfg.train.rare_classes:
                 model.rare_prototypes[str(c)].requires_grad_(True)
 
         else:
             phase = "finetune"
+            # Freeze everything except W_shared_to_class
             for p in model.backbone.parameters():
                 p.requires_grad_(False)
             model.shared_prototypes.requires_grad_(False)
             for c in cfg.train.rare_classes:
                 model.rare_prototypes[str(c)].requires_grad_(False)
-            optimizer = torch.optim.Adam([model.W_shared_to_class],lr=cfg.train.finetune_lr)
+            
+            # Create new optimizer for finetuning
+            finetune_lr = cfg.train.get('finetune_lr', cfg.train.lr * 0.1)
+            optimizer = torch.optim.Adam([model.W_shared_to_class], lr=finetune_lr)
 
         log(f"\nEpoch {epoch+1}/{cfg.train.num_epochs} — Phase: {phase}")
         wandb.log({"epoch": epoch, "phase": phase})
 
         # Train
         model.train()
+        use_amp = cfg.train.get('use_amp', True)  # Enable AMP by default
         train_loss, train_metrics = train_hca(
-            model, optimizer, train_loader, device, phase=phase
+            model, optimizer, train_loader, device, phase=phase, use_amp=use_amp
         )
-        train_loss /= len(train_loader)
-        train_metrics = {k: v / len(train_loader) for k, v in train_metrics.items()}
+        
         log(f"Train Loss: {train_loss:.4f}")
-        wandb.log({"train/loss": train_loss, **{
-            f"train/{k}": v for k, v in train_metrics.items()
-        }})
+        log(f"  CE: {train_metrics['ce']:.4f} | Div: {train_metrics['diversity']:.4f} | "
+            f"Sep: {train_metrics['separation']:.4f} | Cov: {train_metrics['coverage']:.4f} | "
+            f"Ent: {train_metrics['entropy']:.4f}")
+        
+        wandb.log({
+            "train/loss": train_loss, 
+            **{f"train/{k}": v for k, v in train_metrics.items()}
+        })
+
+        # Update learning rate (skip during finetuning with separate optimizer)
+        if phase != "finetune":
+            scheduler.step()
+            wandb.log({"lr": scheduler.get_last_lr()[0]})
 
         # Validate
         val_metrics = validate(model, val_loader, cfg.train.rare_classes, device)
@@ -149,6 +184,7 @@ def main(cfg):
         )
         wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
 
+        # Save best model
         if val_metrics["f1_weighted"] > best_val_f1_weighted:
             best_val_f1_weighted = val_metrics["f1_weighted"]
             best_epoch = epoch + 1
@@ -158,10 +194,14 @@ def main(cfg):
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_metrics": val_metrics,
+                    "training_frequencies": model.training_frequencies,
+                    "N_max": model.N_max,
                 },
-                model_dir / "best_model.pth")
-            log("Best model saved (F1-weighted improved)")
+                model_dir / "best_model.pth"
+            )
+            log("✓ Best model saved (F1-weighted improved)")
 
+    # Load best model for final evaluation
     best_ckpt_path = model_dir / "best_model.pth"
     assert best_ckpt_path.exists(), "Best model checkpoint not found!"
 
@@ -170,8 +210,10 @@ def main(cfg):
     model.to(device)
     model.eval()
 
-    log(f"Loaded best model from epoch {checkpoint['epoch'] + 1} "
+    log(f"\nLoaded best model from epoch {checkpoint['epoch'] + 1} "
         f"(F1-weighted={checkpoint['val_metrics']['f1_weighted']:.4f})")
+    
+    # Visualize prototypes
     visualize_prototypes(
         model=model,
         dataset=train_dataset,
@@ -190,9 +232,11 @@ def main(cfg):
     wandb.finish()
     logclose()
 
+
 def load_config(config_path):
     cfg = OmegaConf.load(config_path)
     return cfg
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -200,8 +244,7 @@ if __name__ == "__main__":
     parser.add_argument('-gpuid', nargs=1, type=str, default='0')
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpuid[0]
-    print(os.environ['CUDA_VISIBLE_DEVICES'])
+    print(f"Using GPU: {os.environ['CUDA_VISIBLE_DEVICES']}")
 
     cfg = load_config(args.config)
     main(cfg)
-

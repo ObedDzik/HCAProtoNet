@@ -321,23 +321,22 @@ def create_backbone(*, cfg, **kwargs):
     pooling_mode=kwargs.get("pooling_mode", getattr(cfg, "pooling_mode", 'gap'))
     pretrained=kwargs.get("pretrained", getattr(cfg, "pretrained", True))
 
-    if 'vit' in backbone_type:
-        if 'deit' in backbone_type:
-            model = deit_small_patch_features(pretrained=pretrained, **kwargs)
-        
-        elif 'dinov3' in backbone_type or 'dino' in backbone_type:
-            model = dinov3_patch_features()
-        
-        backbone = ViTBackbone(
-            features=model,
-            img_size=img_size,
-            output_dim=output_dim,
-            pooling_mode=pooling_mode,
-            **kwargs
-        )
+    if 'deit' in backbone_type:
+        model = deit_small_patch_features(pretrained=pretrained, **kwargs)
     
+    elif 'dinov3' in backbone_type or 'dino' in backbone_type:
+        model = dinov3_patch_features()
+
     else:
         raise ValueError(f"Unknown backbone type: {backbone_type}")
+    
+    backbone = ViTBackbone(
+        features=model,
+        img_size=img_size,
+        output_dim=output_dim,
+        pooling_mode=pooling_mode,
+        **kwargs
+    )
     
     return backbone
 
