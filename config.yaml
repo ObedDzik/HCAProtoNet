@@ -1,0 +1,68 @@
+run_name: HCAProtoNet_testing
+fold: 0
+base_dir: /scratch/obed
+
+architecture:
+  img_size: 224
+  base_architecture: 'deit_small_patch16_224'
+  pooling_mode: 'gap'
+  output_dim: 384
+  use_projection: True
+  normalize_features: True
+  multi_scale: False
+
+train:
+  experiment_run: ${run_name}
+  model_dir: ${base_dir}/hcaprotonet/saved_models/${architecture.base_architecture}/${train.experiment_run}/${fold}
+  num_epochs: 100
+  warmup_epochs: 20
+  joint_epochs: 80
+  visualize_every: 10
+  num_classes: 5
+  num_shared_prototypes: 20
+  rare_classes: [4,5]
+  prototypes_per_class: 8              # 8 prototypes per rare class
+  momentum_shared_prototypes: 0.7             # Momentum for shared prototypes
+  momentum_rare_class: 0.9              # Higher momentum for rare (more stable)
+  coefs: {
+    'diversity': 0.01,
+    'sep': 0.05,          # Separation loss weight
+    'coverage': 0.1,           # Coverage loss weight
+    'entropy': 0.01, 
+  }
+  threshold_freq: 0.1       # Classes with <10% frequency are rare
+  min_active_prototypes: 2             # Min 2 prototypes active per rare class
+  uncertainty_temp: 1.5
+
+data:
+  fold: ${fold}
+  n_folds: 5
+  test_center: null
+  exclude_benign_cores_from_positive_patients: true
+  involvement_threshold_pct: null
+  undersample_benign_ratio: null
+  cohort_selection_mode: splits_file
+  splits_file: "/home/obed/projects/aip-medilab/obed/medproj/ProstoViT/kfold_primus_splits.json" #"/datasets/exactvu_pca/OPTIMUM/processed/processed/UA_annotated_needles/splits.json"
+  dataset: default
+  batch_size: 64
+  num_workers: 16
+  train_subsample_seed: 42
+  augmentations: "all"
+  augment_strength: "strong"  # or "light" / "strong"
+  image_size: ${architecture.img_size}
+  first_downsample_size: null
+  mask_size: ${architecture.img_size}
+  limit_train_data: null
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  flip_ud: false
+  frames: first
+  crop_to_prostate: True
+  rf_as_bmode: false
+  include_rf: false
+  return_raw_images: False
+  data_path: "/datasets/exactvu_pca/OPTIMUM/UA_OL_PU_annotated_needles_multiframe"
+
+wandb:
+  name: ${run_name}_fold${data.fold}
+  project: hcaprototypes
